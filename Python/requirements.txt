@@ -1,0 +1,25 @@
+# Core dependencies
+fastapi
+uvicorn
+websockets
+pydantic
+
+torch
+torchaudio
+transformers
+whisper
+sounddevice
+webrtcvad
+noisereduce
+scipy
+numpy
+
+# Browser automation
+selenium
+webdriver-manager
+
+# System utilities
+psutil
+pathlib2
+pyautogui
+pynput
