@@ -1,4 +1,3 @@
-
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -16,11 +15,9 @@ class BrowserController:
     def _ensure_valid_window(self):
         """Ensure we're on a valid window, switch if current is closed"""
         try:
-            # Try to access current window
             _ = self.driver.current_window_handle
             return True
-        except:
-            # Current window is closed, try to switch to any available window
+        except Exception:
             try:
                 handles = self.driver.window_handles
                 if handles:
@@ -33,115 +30,166 @@ class BrowserController:
             except Exception as e:
                 print(f"❌ Cannot recover from closed window: {e}")
                 return False
+
     def click_first_link(self):
-        try:
-            print("🖱️  Clicking first link...")
-            selectors = [
-                "a[href]",
-                "div[role='link']",
-                "button[type='button']",
-            ]
-            for selector in selectors:
-                try:
-                    links = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if links:
-                        first_link = links[0]
-                        self.driver.execute_script("arguments[0].scrollIntoView();", first_link)
-                        time.sleep(0.5)
-                        first_link.click()
-                        print("✓ Clicked first link!")
-                        return True
-                except:
-                    continue
-            print("✗ No clickable links found")
-            return False
-        except Exception as e:
-            print(f"✗ Click failed: {e}")
-            return False
+        """Click the first organic link/product on page"""
+        return self.click_nth_element(1, element_type="link")
+
     def click_nth_element(self, n, element_type="link"):
+        """Click the nth link, video, or result instantly via in-browser JavaScript"""
         try:
+            if not self._ensure_valid_window():
+                return False
+
             print(f"🖱️  Clicking {n}th {element_type}...")
-            selectors = {
-                'link': "a[href]",
-                'video': "video, ytd-video-renderer, ytd-grid-video-renderer",
-                'button': "button",
-                'image': "img",
-                'result': "div.g, div.result, div[data-testid='result']",
+            target_idx = max(0, n - 1)
+
+            # In-browser JavaScript locates and triggers the click without hanging Selenium
+            js_script = """
+            const targetIndex = arguments[0];
+            const type = arguments[1];
+
+            function getCandidates() {
+                if (type === 'video') {
+                    return Array.from(document.querySelectorAll('ytd-video-renderer a#video-title, a#video-title-link, video'));
+                }
+                
+                // Prioritized list of modern search and e-commerce product selectors
+                const selectors = [
+                    "div[data-component-type='s-search-result'] h2 a",
+                    "div.s-result-item h2 a",
+                    "a.a-link-normal.s-underline-text",
+                    "div#search div.g a:has(h3)",
+                    "div#search a h3",
+                    "ytd-video-renderer a#video-title",
+                    "main h2 a",
+                    "main h3 a",
+                    "h2 a"
+                ];
+
+                for (let sel of selectors) {
+                    let found = Array.from(document.querySelectorAll(sel));
+                    let visible = found.filter(el => {
+                        let rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0 && el.href && !el.href.startsWith('javascript:');
+                    });
+                    if (visible.length > 0) {
+                        return visible;
+                    }
+                }
+
+                // Fallback: visible semantic links
+                return Array.from(document.querySelectorAll('main a[href], div#content a[href], body a[href]'))
+                    .filter(el => {
+                        let rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0 && el.innerText.trim().length > 3;
+                    });
             }
-            selector = selectors.get(element_type.lower(), "a[href]")
-            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-            if len(elements) >= n:
-                target = elements[n - 1]
-                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target)
-                time.sleep(1)
-                target.click()
-                print(f"✓ Clicked {n}th {element_type}!")
+
+            const candidates = getCandidates();
+            if (candidates.length > targetIndex) {
+                const target = candidates[targetIndex];
+                target.scrollIntoView({behavior: 'smooth', block: 'center'});
+                
+                const title = target.innerText.trim() || target.getAttribute('aria-label') || target.href;
+                
+                // Dispatch click directly inside browser context
+                try {
+                    target.click();
+                } catch(e) {
+                    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                }
+
+                return { success: true, title: title, total: candidates.length };
+            }
+
+            return { success: false, total: candidates.length };
+            """
+
+            result = self.driver.execute_script(js_script, target_idx, element_type.lower())
+
+            if result and result.get("success"):
+                title = result.get("title", f"{element_type} #{n}")
+                print(f"✓ Clicked {n}th {element_type}: {title[:60]}")
                 return True
             else:
-                print(f"✗ Only found {len(elements)} {element_type}s, cannot click {n}th")
+                total_found = result.get("total", 0) if result else 0
+                print(f"✗ Found {total_found} {element_type}s, could not click #{n}")
                 return False
+
         except Exception as e:
             print(f"✗ Click failed: {e}")
             return False
+
     def scroll_down(self, amount="medium"):
         try:
+            if not self._ensure_valid_window():
+                return False
             print("📜 Scrolling down...")
             scroll_amounts = {
-                'small': 300,
-                'medium': 600,
+                'small': 350,
+                'medium': 650,
                 'large': 1000,
-                'page': 'window.innerHeight',
             }
-            pixels = scroll_amounts.get(amount, 600)
-            if isinstance(pixels, str):
-                self.driver.execute_script(f"window.scrollBy(0, {pixels});")
-            else:
-                self.driver.execute_script(f"window.scrollBy(0, {pixels});")
+            pixels = scroll_amounts.get(amount, 650)
+            self.driver.execute_script(f"""
+                window.scrollBy({{top: {pixels}, left: 0, behavior: 'smooth'}});
+                var el = document.scrollingElement || document.documentElement || document.body;
+                if (el) el.scrollTop += {pixels};
+            """)
             time.sleep(0.5)
             print("✓ Scrolled down!")
             return True
         except Exception as e:
             print(f"✗ Scroll failed: {e}")
             return False
+
     def scroll_up(self, amount="medium"):
         try:
+            if not self._ensure_valid_window():
+                return False
             print("📜 Scrolling up...")
             scroll_amounts = {
-                'small': 300,
-                'medium': 600,
+                'small': 350,
+                'medium': 650,
                 'large': 1000,
-                'page': 'window.innerHeight',
             }
-            pixels = scroll_amounts.get(amount, 600)
-            if isinstance(pixels, str):
-                self.driver.execute_script(f"window.scrollBy(0, -{pixels});")
-            else:
-                self.driver.execute_script(f"window.scrollBy(0, -{pixels});")
+            pixels = scroll_amounts.get(amount, 650)
+            self.driver.execute_script(f"""
+                window.scrollBy({{top: -{pixels}, left: 0, behavior: 'smooth'}});
+                var el = document.scrollingElement || document.documentElement || document.body;
+                if (el) el.scrollTop -= {pixels};
+            """)
             time.sleep(0.5)
             print("✓ Scrolled up!")
             return True
         except Exception as e:
             print(f"✗ Scroll failed: {e}")
             return False
+
     def scroll_to_element(self, text):
         try:
+            if not self._ensure_valid_window():
+                return False
             print(f"📜 Scrolling to: {text}")
             xpath = f"//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')]"
             elements = self.driver.find_elements(By.XPATH, xpath)
-            if elements:
-                target = elements[0]
-                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target)
-                time.sleep(1)
-                print(f"✓ Scrolled to: {text}")
-                return True
-            else:
-                print(f"✗ Could not find: {text}")
-                return False
+            for el in elements:
+                if el.is_displayed():
+                    self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", el)
+                    time.sleep(0.5)
+                    print(f"✓ Scrolled to: {text}")
+                    return True
+            print(f"✗ Could not find: {text}")
+            return False
         except Exception as e:
             print(f"✗ Scroll failed: {e}")
             return False
+
     def close_popup(self):
         try:
+            if not self._ensure_valid_window():
+                return False
             print("❌ Closing popup...")
             close_selectors = [
                 "button[aria-label*='close' i]",
@@ -154,11 +202,12 @@ class BrowserController:
             for selector in close_selectors:
                 try:
                     close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    close_btn.click()
-                    time.sleep(0.5)
-                    print("✓ Popup closed!")
-                    return True
-                except:
+                    if close_btn.is_displayed():
+                        close_btn.click()
+                        time.sleep(0.5)
+                        print("✓ Popup closed!")
+                        return True
+                except Exception:
                     continue
             try:
                 actions = ActionChains(self.driver)
@@ -166,13 +215,14 @@ class BrowserController:
                 time.sleep(0.5)
                 print("✓ Pressed Escape key!")
                 return True
-            except:
+            except Exception:
                 pass
             print("✗ No popup found or could not close")
             return False
         except Exception as e:
             print(f"✗ Close popup failed: {e}")
             return False
+
     def volume_up(self):
         try:
             print("🔊 Increasing volume...")
@@ -189,8 +239,9 @@ class BrowserController:
                 actions.send_keys(Keys.ARROW_UP).perform()
                 print("✓ Sent volume up key")
                 return True
-            except:
+            except Exception:
                 return False
+
     def volume_down(self):
         try:
             print("🔉 Decreasing volume...")
@@ -207,79 +258,58 @@ class BrowserController:
                 actions.send_keys(Keys.ARROW_DOWN).perform()
                 print("✓ Sent volume down key")
                 return True
-            except:
+            except Exception:
                 return False
+
     def click_element_by_text(self, text, page_reader=None):
         try:
+            if not self._ensure_valid_window():
+                return False
             print(f"🖱️  Clicking element: {text}")
-            import re
             text_clean = re.sub(r'\b(called|titled|named|file|page|link|button|there is a|can you)\b', '', text.lower()).strip()
-            if text_clean != text.lower():
-                print(f"   Cleaned search text: '{text_clean}'")
-            wait = WebDriverWait(self.driver, 5)
+            wait = WebDriverWait(self.driver, 4)
+            
             try:
                 xpath = f"//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text_clean}')]"
                 element = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
                 self.driver.execute_script("arguments[0].click();", element)
                 print(f"✓ Clicked: {element.text.strip()}")
                 return True
-            except:
+            except Exception:
                 pass
+
             try:
                 xpath = f"//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text_clean}')]"
                 element = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
                 self.driver.execute_script("arguments[0].click();", element)
                 print(f"✓ Clicked: {element.text.strip()}")
                 return True
-            except:
+            except Exception:
                 pass
-            try:
-                words = text_clean.split()
-                if len(words) > 1:
-                    links = self.driver.find_elements(By.CSS_SELECTOR, "a[href]")
-                    for link in links:
-                        try:
-                            if link.is_displayed():
-                                link_text = link.text.lower()
-                                matches = sum(1 for word in words if word in link_text)
-                                if matches >= min(2, len(words)):
-                                    self.driver.execute_script("arguments[0].click();", link)
-                                    print(f"✓ Clicked (partial match): {link.text.strip()}")
-                                    return True
-                        except:
-                            continue
-            except:
-                pass
+
             if page_reader:
                 element = page_reader.find_element_by_partial_text(text_clean)
                 if element:
                     try:
                         self.driver.execute_script("arguments[0].click();", element)
-                        print(f"✓ Clicked via PageReader!")
+                        print("✓ Clicked via PageReader!")
                         return True
-                    except:
+                    except Exception:
                         pass
+
             print(f"✗ Could not find element: {text}")
             return False
         except Exception as e:
             print(f"✗ Click failed: {e}")
             return False
+
     def highlight_element(self, element):
         try:
             css = """
             @keyframes pulse-circle {
-                0% {
-                    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7),
-                                0 0 0 0 rgba(255, 0, 0, 0.7);
-                }
-                50% {
-                    box-shadow: 0 0 0 15px rgba(255, 0, 0, 0),
-                                0 0 0 30px rgba(255, 0, 0, 0);
-                }
-                100% {
-                    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0),
-                                0 0 0 0 rgba(255, 0, 0, 0);
-                }
+                0% { box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7); }
+                50% { box-shadow: 0 0 0 15px rgba(255, 0, 0, 0); }
+                100% { box-shadow: 0 0 0 0 rgba(255, 0, 0, 0); }
             }
             .ai-highlight {
                 animation: pulse-circle 2s infinite !important;
@@ -306,12 +336,11 @@ class BrowserController:
         except Exception as e:
             print(f"⚠ Could not highlight element: {e}")
             return False
+
     def remove_highlight(self, element=None):
         try:
             if element:
-                self.driver.execute_script("""
-                    arguments[0].classList.remove('ai-highlight');
-                """, element)
+                self.driver.execute_script("arguments[0].classList.remove('ai-highlight');", element)
             else:
                 self.driver.execute_script("""
                     document.querySelectorAll('.ai-highlight').forEach(el => {
@@ -319,10 +348,13 @@ class BrowserController:
                     });
                 """)
             return True
-        except:
+        except Exception:
             return False
+
     def play_video_by_title(self, title):
         try:
+            if not self._ensure_valid_window():
+                return False
             print(f"▶️  Playing video: {title}")
             youtube_selectors = [
                 f"//ytd-video-renderer//a[@title[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{title.lower()}')]]",
@@ -332,21 +364,23 @@ class BrowserController:
                 try:
                     video_link = self.driver.find_element(By.XPATH, selector)
                     self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", video_link)
-                    time.sleep(1)
+                    time.sleep(0.5)
                     video_link.click()
                     print(f"✓ Playing video: {title}")
                     return True
-                except:
+                except Exception:
                     continue
+
             xpath = f"//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{title.lower()}')]"
             elements = self.driver.find_elements(By.XPATH, xpath)
-            if elements:
-                target = elements[0]
-                self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target)
-                time.sleep(1)
-                target.click()
-                print(f"✓ Playing video: {title}")
-                return True
+            for target in elements:
+                if target.is_displayed():
+                    self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", target)
+                    time.sleep(0.5)
+                    target.click()
+                    print(f"✓ Playing video: {title}")
+                    return True
+
             print(f"✗ Video not found: {title}")
             return False
         except Exception as e:
@@ -356,22 +390,16 @@ class BrowserController:
     # ==================== TAB MANAGEMENT ====================
     
     def create_new_tab(self, url=None):
-        """Open a new tab, optionally with a URL"""
         try:
-            # Ensure we're on a valid window first
             if not self._ensure_valid_window():
                 return False
-            
             print("📑 Creating new tab...")
-            # Get current handle to return to it
             original_handle = self.driver.current_window_handle
             original_handles = self.driver.window_handles
             
-            # Open new tab
             self.driver.execute_script("window.open('');")
             time.sleep(0.5)
             
-            # Switch to new tab
             new_handles = self.driver.window_handles
             new_tab = [h for h in new_handles if h not in original_handles][0]
             self.driver.switch_to.window(new_tab)
@@ -382,23 +410,17 @@ class BrowserController:
             else:
                 print("✓ New tab created!")
             
-            # Switch back to original tab/window so driver stays valid
             try:
                 self.driver.switch_to.window(original_handle)
-                print("   (Staying on original tab)")
-            except:
-                # Original might be closed, stay on new tab
+            except Exception:
                 pass
-            
             return True
         except Exception as e:
             print(f"✗ Create new tab failed: {e}")
-            # Try to recover
             self._ensure_valid_window()
             return False
     
     def switch_to_tab(self, tab_index):
-        """Switch to a specific tab by index (1-based)"""
         try:
             handles = self.driver.window_handles
             if 0 < tab_index <= len(handles):
@@ -413,9 +435,7 @@ class BrowserController:
             return False
     
     def switch_to_first_tab(self):
-        """Switch to the first tab"""
         try:
-            print("📑 Switching to first tab...")
             handles = self.driver.window_handles
             if handles:
                 self.driver.switch_to.window(handles[0])
@@ -427,9 +447,7 @@ class BrowserController:
             return False
     
     def switch_to_last_tab(self):
-        """Switch to the last tab"""
         try:
-            print("📑 Switching to last tab...")
             handles = self.driver.window_handles
             if handles:
                 self.driver.switch_to.window(handles[-1])
@@ -441,9 +459,7 @@ class BrowserController:
             return False
     
     def switch_to_next_tab(self):
-        """Switch to the next tab (wraps around)"""
         try:
-            print("📑 Switching to next tab...")
             handles = self.driver.window_handles
             current_handle = self.driver.current_window_handle
             current_index = handles.index(current_handle)
@@ -456,9 +472,7 @@ class BrowserController:
             return False
     
     def switch_to_previous_tab(self):
-        """Switch to the previous tab (wraps around)"""
         try:
-            print("📑 Switching to previous tab...")
             handles = self.driver.window_handles
             current_handle = self.driver.current_window_handle
             current_index = handles.index(current_handle)
@@ -471,13 +485,10 @@ class BrowserController:
             return False
     
     def close_current_tab(self):
-        """Close the current tab and switch to the next one"""
         try:
-            print("❌ Closing current tab...")
             handles = self.driver.window_handles
             if len(handles) > 1:
                 self.driver.close()
-                # Switch to the first available tab
                 remaining_handles = self.driver.window_handles
                 self.driver.switch_to.window(remaining_handles[0])
                 print("✓ Tab closed!")
@@ -490,17 +501,13 @@ class BrowserController:
             return False
     
     def close_other_tabs(self):
-        """Close all tabs except the current one"""
         try:
-            print("❌ Closing all other tabs...")
             current_handle = self.driver.current_window_handle
             all_handles = self.driver.window_handles
-            
             for handle in all_handles:
                 if handle != current_handle:
                     self.driver.switch_to.window(handle)
                     self.driver.close()
-            
             self.driver.switch_to.window(current_handle)
             print("✓ All other tabs closed!")
             return True
@@ -509,19 +516,16 @@ class BrowserController:
             return False
     
     def list_all_tabs(self):
-        """List all open tabs with their titles"""
         try:
-            print("\n📑 Open Tabs:")
-            print("=" * 70)
             handles = self.driver.window_handles
             current_handle = self.driver.current_window_handle
-            
+            print("\n📑 Open Tabs:")
+            print("=" * 70)
             for i, handle in enumerate(handles, 1):
                 self.driver.switch_to.window(handle)
                 title = self.driver.title or "(No title)"
                 current_marker = " ← Current" if handle == current_handle else ""
                 print(f"  {i}. {title}{current_marker}")
-            
             self.driver.switch_to.window(current_handle)
             print("=" * 70)
             print(f"Total tabs: {len(handles)}\n")
@@ -533,22 +537,16 @@ class BrowserController:
     # ==================== WINDOW MANAGEMENT ====================
     
     def create_new_window(self, url=None):
-        """Open a new browser window (Ctrl+N equivalent)"""
         try:
-            # Ensure we're on a valid window first
             if not self._ensure_valid_window():
                 return False
-            
             print("🪟 Creating new window...")
-            # Get current window handle to return to it
             original_handle = self.driver.current_window_handle
             original_handles = self.driver.window_handles
             
-            # Open new window
             self.driver.execute_script("window.open('', '_blank', 'width=1200,height=800');")
             time.sleep(0.5)
             
-            # Switch to new window
             new_handles = self.driver.window_handles
             new_window = [h for h in new_handles if h not in original_handles][0]
             self.driver.switch_to.window(new_window)
@@ -560,38 +558,21 @@ class BrowserController:
                 self.driver.get("about:blank")
                 print("✓ New window created!")
             
-            # Switch back to original window so driver stays valid
             try:
                 self.driver.switch_to.window(original_handle)
-                print("   (Staying on original window)")
-            except:
-                # Original window might be closed, stay on new window
+            except Exception:
                 pass
-            
             return True
         except Exception as e:
             print(f"✗ Create new window failed: {e}")
-            # Try to recover
             self._ensure_valid_window()
             return False
     
     def create_incognito_window(self):
-        """Create a new incognito/private window (Note: Requires browser setup)"""
-        try:
-            print("🕵️  Creating incognito window...")
-            print("⚠️  Note: Incognito windows require special browser configuration")
-            print("    This will open a new regular window instead.")
-            # Selenium limitation: Can't directly create incognito windows
-            # The browser must be started in incognito mode initially
-            return self.create_new_window()
-        except Exception as e:
-            print(f"✗ Create incognito window failed: {e}")
-            return False
+        return self.create_new_window()
     
     def maximize_window(self):
-        """Maximize the current window"""
         try:
-            print("📏 Maximizing window...")
             self.driver.maximize_window()
             print("✓ Window maximized!")
             return True
@@ -600,9 +581,7 @@ class BrowserController:
             return False
     
     def minimize_window(self):
-        """Minimize the current window"""
         try:
-            print("📏 Minimizing window...")
             self.driver.minimize_window()
             print("✓ Window minimized!")
             return True
@@ -611,9 +590,7 @@ class BrowserController:
             return False
     
     def fullscreen_window(self):
-        """Set window to fullscreen (F11 equivalent)"""
         try:
-            print("🖥️  Entering fullscreen...")
             self.driver.fullscreen_window()
             print("✓ Fullscreen mode activated!")
             return True
@@ -624,9 +601,7 @@ class BrowserController:
     # ==================== NAVIGATION ====================
     
     def go_back(self):
-        """Navigate back in browser history"""
         try:
-            print("⬅️  Going back...")
             self.driver.back()
             time.sleep(0.5)
             print("✓ Navigated back!")
@@ -636,9 +611,7 @@ class BrowserController:
             return False
     
     def go_forward(self):
-        """Navigate forward in browser history"""
         try:
-            print("➡️  Going forward...")
             self.driver.forward()
             time.sleep(0.5)
             print("✓ Navigated forward!")
@@ -648,9 +621,7 @@ class BrowserController:
             return False
     
     def refresh_page(self):
-        """Refresh/reload the current page"""
         try:
-            print("🔄 Refreshing page...")
             self.driver.refresh()
             time.sleep(1)
             print("✓ Page refreshed!")
@@ -660,7 +631,6 @@ class BrowserController:
             return False
     
     def get_current_url(self):
-        """Get the current page URL"""
         try:
             url = self.driver.current_url
             print(f"🔗 Current URL: {url}")
@@ -670,7 +640,6 @@ class BrowserController:
             return None
     
     def get_page_title(self):
-        """Get the current page title"""
         try:
             title = self.driver.title
             print(f"📄 Page title: {title}")
