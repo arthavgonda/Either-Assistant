@@ -31,11 +31,9 @@ class EnhancedIntelligentBrowser:
     def _ensure_valid_window(self):
         """Ensure we're on a valid window, switch if current is closed"""
         try:
-            # Try to access current window
             _ = self.driver.current_window_handle
             return True
-        except:
-            # Current window is closed, try to switch to any available window
+        except Exception:
             try:
                 handles = self.driver.window_handles
                 if handles:
@@ -48,8 +46,88 @@ class EnhancedIntelligentBrowser:
             except Exception as e:
                 print(f"❌ Cannot recover from closed window: {e}")
                 return False
+
+    def scroll_page(self, direction="down", amount=700):
+        """Scroll the page down or up using multiple browser mechanisms"""
+        if not self._ensure_valid_window():
+            return False
+        delta = amount if direction == "down" else -amount
+        print(f"📜 Scrolling {direction} ({delta}px)...")
+        try:
+            # 1. Window smooth scrolling
+            self.driver.execute_script(f"window.scrollBy({{top: {delta}, left: 0, behavior: 'smooth'}});")
+            
+            # 2. Scrolling element / document body fallback for custom containers
+            self.driver.execute_script(f"""
+                var el = document.scrollingElement || document.documentElement || document.body;
+                if (el) el.scrollTop += {delta};
+            """)
+            print(f"✓ Scrolled {direction} successfully")
+            return True
+        except Exception as e:
+            print(f"❌ Scroll error: {e}")
+            return False
+
+    def click_first_link(self):
+        """Click the first primary result on Amazon, Google, YouTube, or general search pages"""
+        if not self._ensure_valid_window():
+            return False
+        print("🖱️ Searching for primary/first clickable result link...")
+        selectors = [
+            # Amazon product card titles
+            "div[data-component-type='s-search-result'] h2 a",
+            "div.s-result-item h2 a",
+            "a.a-link-normal.s-no-outline",
+            # Google search titles
+            "div#search a h3",
+            "div.g a h3",
+            "h3.LC20lb",
+            # YouTube video titles
+            "ytd-video-renderer #video-title",
+            "a#video-title",
+            # Generic semantic headers containing links
+            "h2 a", "h3 a", "h1 a",
+            "main a[href]:not([href^='#'])",
+            "article a[href]"
+        ]
+        for sel in selectors:
+            try:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in elements:
+                    if el.is_displayed():
+                        target = el
+                        if el.tag_name.lower() in ['h2', 'h3', 'span']:
+                            try:
+                                target = el.find_element(By.XPATH, "./parent::a")
+                            except Exception:
+                                pass
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+                        time.sleep(0.5)
+                        try:
+                            target.click()
+                        except Exception:
+                            self.driver.execute_script("arguments[0].click();", target)
+                        print(f"✓ Clicked link: {target.text[:50] or target.get_attribute('href')[:50]}")
+                        return True
+            except Exception:
+                continue
+
+        print("✗ No clickable results found")
+        return False
+
     def parse_command(self, text):
         text = text.lower().strip()
+
+        # Browser Navigation & Interaction
+        if re.search(r"^(?:scroll\s+down|page\s+down|go\s+down|niche\s+karo)", text):
+            return {"action": "scroll", "direction": "down"}
+        if re.search(r"^(?:scroll\s+up|page\s+up|go\s+up|upar\s+karo)", text):
+            return {"action": "scroll", "direction": "up"}
+        if re.search(r"(?:click|open)\s+(?:on\s+)?(?:the\s+)?(?:first|1st)\s+(?:link|result|item|product)", text):
+            return {"action": "click_first_link"}
+        if re.search(r"^go\s+back|^previous\s+page", text):
+            return {"action": "go_back"}
+
         file_patterns = [
             (r"^create\s+(?:a\s+)?file\s+(?:named\s+|called\s+)?(.+)", "create_file"),
             (r"^make\s+(?:a\s+)?file\s+(?:named\s+|called\s+)?(.+)", "create_file"),
@@ -60,6 +138,7 @@ class EnhancedIntelligentBrowser:
             match = re.search(pattern, text)
             if match:
                 return {"action": action, "target": match.group(1).strip()}
+
         folder_patterns = [
             (r"^create\s+(?:a\s+)?folder\s+(?:named\s+|called\s+)?(.+)", "create_folder"),
             (r"^make\s+(?:a\s+)?folder\s+(?:named\s+|called\s+)?(.+)", "create_folder"),
@@ -72,6 +151,7 @@ class EnhancedIntelligentBrowser:
             match = re.search(pattern, text)
             if match:
                 return {"action": action, "target": match.group(1).strip()}
+
         if re.search(r"^open\s+whatsapp", text):
             return {"action": "open_whatsapp"}
         if re.search(r"send\s+(?:a\s+)?(?:message|msg)\s+to\s+(.+)", text):
@@ -84,8 +164,7 @@ class EnhancedIntelligentBrowser:
             return {"action": "list_files", "target": directory}
         if re.search(r"^open\s+(?:the\s+)?app\s+store", text):
             return {"action": "open_app_store"}
-        # Enhanced download/install patterns with explicit source detection
-        # Priority 1: Terminal/Package Manager installation
+
         terminal_patterns = [
             (r"^terminal\s+install\s+(.+)", 1),
             (r"^package\s+install\s+(.+)", 1),
@@ -97,8 +176,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(group).strip()
                 return {"action": "terminal_install", "item": app_name}
-        
-        # Priority 2: Snap Store installation
+
         snap_patterns = [
             (r"(?:install|download|get)\s+(.+?)\s+(?:via|through|by|using|from)\s+snap(?:\s+store)?", 1),
             (r"snap\s+install\s+(.+)", 1),
@@ -108,8 +186,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(group).strip()
                 return {"action": "snap_install", "item": app_name}
-        
-        # Priority 3: Flatpak installation
+
         flatpak_patterns = [
             (r"(?:install|download|get)\s+(.+?)\s+(?:via|through|by|using|from)\s+flatpak", 1),
             (r"flatpak\s+install\s+(.+)", 1),
@@ -119,8 +196,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(group).strip()
                 return {"action": "flatpak_install", "item": app_name}
-        
-        # Priority 4: App Store (Microsoft Store / Mac App Store / GNOME Software)
+
         appstore_patterns = [
             (r"(?:install|download|get)\s+(.+?)\s+(?:via|through|by|using|from)\s+(?:app\s+store|microsoft\s+store|mac\s+app\s+store|gnome\s+software)", 1),
             (r"app\s+store\s+install\s+(.+)", 1),
@@ -130,8 +206,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(group).strip()
                 return {"action": "appstore_install", "item": app_name}
-        
-        # Priority 5: Explicit web download
+
         web_download_patterns = [
             (r"(?:download|get|install)\s+(.+?)\s+(?:from|via)\s+(?:the\s+)?(?:web|internet|online|website)", 1),
             (r"web\s+download\s+(.+)", 1),
@@ -141,8 +216,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(group).strip()
                 return {"action": "web_download", "item": app_name}
-        
-        # Priority 6: Generic download/install (defaults to web download)
+
         download_patterns = [
             r"^download\s+(?:and\s+install\s+)?(.+)",
             r"^get\s+(.+)",
@@ -152,8 +226,8 @@ class EnhancedIntelligentBrowser:
             match = re.search(pattern, text)
             if match:
                 item = match.group(1).strip()
-                # Default to web download unless already captured above
                 return {"action": "web_download", "item": item}
+
         platform_search_patterns = [
             r"(?:search|khojo|dhundo|find|lookup)\s+(?:for\s+)?(.+?)\s+(?:on|in|par|me)\s+(\w+)",
             r"(?:open|go to|use)\s+(\w+)\s+(?:and|to)\s+(?:search|find|order|buy)\s+(?:for\s+)?(?:me\s+)?(?:a\s+)?(.+)",
@@ -165,19 +239,20 @@ class EnhancedIntelligentBrowser:
                 groups = match.groups()
                 if idx == 0:
                     query = groups[0].strip()
-                    platform = groups[1].strip().lower()
+                    platform_str = groups[1].strip().lower()
                 elif idx == 1:
-                    platform = groups[0].strip().lower()
+                    platform_str = groups[0].strip().lower()
                     query = groups[1].strip()
                 else:
-                    platform = groups[0].strip().lower()
+                    platform_str = groups[0].strip().lower()
                     query = groups[1].strip()
                 web_platforms = ['youtube', 'google', 'facebook', 'instagram', 'twitter', 'amazon', 
                                 'reddit', 'wikipedia', 'spotify', 'linkedin', 'github', 'chatgpt',
                                 'netflix', 'pinterest', 'tiktok', 'whatsapp', 'telegram', 'ebay',
                                 'stackoverflow', 'medium', 'quora', 'imdb', 'yelp', 'twitch']
-                if any(plat in platform for plat in web_platforms) or len(platform) > 3:
-                    return {"action": "platform_search", "query": query, "platform": platform}
+                if any(plat in platform_str for plat in web_platforms) or len(platform_str) > 3:
+                    return {"action": "platform_search", "query": query, "platform": platform_str}
+
         open_app_patterns = [
             r"^(?:open|launch|start|run|kholo|chalu)\s+(.+?)(?:\s+from\s+system|\s+on\s+system|\s+in\s+system)?$",
         ]
@@ -186,6 +261,7 @@ class EnhancedIntelligentBrowser:
             if match:
                 app_name = match.group(1).strip()
                 return {"action": "open_app", "app": app_name}
+
         search_patterns = [
             r"^(?:search|look up|find|google)\s+(?:for\s+)?(.+)",
             r"^(?:what is|who is|tell me about|info on)\s+(.+)",
@@ -197,22 +273,35 @@ class EnhancedIntelligentBrowser:
                 query = match.group(1).strip()
                 if re.match(r"^(https?://|www\.)", query):
                     return {"action": "open_website", "url": query}
-                elif '.' in query and not ' ' in query:
+                elif '.' in query and ' ' not in query:
                     return {"action": "open_website", "url": query}
                 else:
                     return {"action": "search_google", "query": query}
+
         if re.search(r"^system\s+info", text):
             return {"action": "system_info"}
         if re.search(r"^list\s+apps?|^show\s+apps?", text):
             return {"action": "list_apps"}
         return {"action": "unknown", "command": text}
+
     def execute_command(self, text):
         command = self.parse_command(text)
         action = command.get("action")
-        if action == "platform_search":
+
+        if action == "scroll":
+            return self.scroll_page(direction=command.get("direction", "down"))
+        elif action == "click_first_link":
+            return self.click_first_link()
+        elif action == "go_back":
+            if self._ensure_valid_window():
+                self.driver.back()
+                print("⬅️ Navigated back")
+                return True
+            return False
+        elif action == "platform_search":
             query = command["query"]
-            platform = command["platform"]
-            self.search_on_platform(query, platform)
+            platform_str = command["platform"]
+            self.search_on_platform(query, platform_str)
             return True
         elif action == "open_app":
             app_name = command["app"]
@@ -249,13 +338,8 @@ class EnhancedIntelligentBrowser:
             print(f"🏪 Installing via App Store: {command['item']}")
             self.install_via_appstore(command["item"])
             return True
-        elif action == "web_download":
+        elif action == "web_download" or action == "download":
             print(f"🌐 Downloading from web: {command['item']}")
-            self.download_and_install(command["item"])
-            return True
-        elif action == "download":
-            # Legacy support - defaults to web download
-            print(f"🌐 Downloading from web (default): {command['item']}")
             self.download_and_install(command["item"])
             return True
         elif action == "search_google":
@@ -279,12 +363,14 @@ class EnhancedIntelligentBrowser:
         else:
             print(f"❓ Unknown: {text}")
             return False
+
     def download_research(self, topic, max_papers=5):
         try:
             return self.research_downloader.download_research_papers(topic, max_papers)
         except Exception as e:
             print(f"❌ Research download error: {e}")
             return False
+
     def play_first_result(self, query, platform="youtube"):
         try:
             if platform.lower() == "youtube":
@@ -297,8 +383,9 @@ class EnhancedIntelligentBrowser:
             print(f"❌ Play error: {e}")
             self.search_on_platform(query, platform)
             return False, str(e)
-    def search_on_platform(self, query, platform):
-        platform_lower = platform.lower().strip()
+
+    def search_on_platform(self, query, platform_name):
+        platform_lower = platform_name.lower().strip()
         platform_urls = {
             'youtube': f'https://www.youtube.com/results?search_query={query.replace(" ", "+")}',
             'google': f'https://www.google.com/search?q={query.replace(" ", "+")}',
@@ -329,16 +416,16 @@ class EnhancedIntelligentBrowser:
             print(f"🤖 Opening ChatGPT (query: {query})")
             return self.open_website(f'https://chat.openai.com/?q={query.replace(" ", "+")}')
         if 'whatsapp' in platform_lower:
-            print(f"💬 Opening WhatsApp Web")
+            print("💬 Opening WhatsApp Web")
             return self.open_website('https://web.whatsapp.com')
         if 'gmail' in platform_lower or 'mail' in platform_lower:
             print(f"📧 Searching Gmail for: {query}")
             return self.open_website(f'https://mail.google.com/mail/u/0/#search/{query.replace(" ", "+")}')
         if platform_lower in platform_urls:
             url = platform_urls[platform_lower]
-            print(f"🔍 Searching '{query}' on {platform.title()}")
+            print(f"🔍 Searching '{query}' on {platform_name.title()}")
             return self.open_website(url)
-        print(f"🌐 Attempting generic search on {platform}...")
+        print(f"🌐 Attempting generic search on {platform_name}...")
         generic_patterns = [
             f'https://www.{platform_lower}.com/search?q={query.replace(" ", "+")}',
             f'https://{platform_lower}.com/search?q={query.replace(" ", "+")}',
@@ -347,12 +434,12 @@ class EnhancedIntelligentBrowser:
             url = generic_patterns[0]
             print(f"   Trying: {url}")
             return self.open_website(url)
-        except:
-            print(f"   ⚠ Search URL unknown, opening homepage")
+        except Exception:
+            print("   ⚠ Search URL unknown, opening homepage")
             homepage = f'https://www.{platform_lower}.com'
             return self.open_website(homepage)
+
     def search_google(self, query):
-        # Ensure we have a valid window first
         if not self._ensure_valid_window():
             print("Browser window closed, cannot search")
             return False
@@ -387,6 +474,7 @@ class EnhancedIntelligentBrowser:
                     time.sleep(2)
                     continue
         return False
+
     def download_and_install(self, item):
         print(f"\nDownloading and installing: {item}")
         platform_buttons = {
@@ -413,12 +501,12 @@ class EnhancedIntelligentBrowser:
                         time.sleep(0.5)
                         try:
                             elem.click()
-                        except:
+                        except Exception:
                             self.driver.execute_script("arguments[0].click();", elem)
                         print("Download button clicked")
                         time.sleep(2)
                         return True
-            except:
+            except Exception:
                 pass
         self.search_google(f"{item} official download {self.platform_name.lower()}")
         time.sleep(2)
@@ -437,7 +525,7 @@ class EnhancedIntelligentBrowser:
                         link.click()
                         time.sleep(2)
                         break
-                except:
+                except Exception:
                     continue
             else:
                 self.click_first_result()
@@ -452,6 +540,7 @@ class EnhancedIntelligentBrowser:
         print(f"Could not automatically download {item}")
         print("Please download manually from the opened page.")
         return False
+
     def find_platform_specific_download(self, current_platform):
         print("Looking for platform-specific download...")
         selectors = [
@@ -470,7 +559,7 @@ class EnhancedIntelligentBrowser:
                         time.sleep(0.5)
                         try:
                             elem.click()
-                        except:
+                        except Exception:
                             self.driver.execute_script("arguments[0].click();", elem)
                         print("Download button clicked")
                         time.sleep(2)
@@ -478,6 +567,7 @@ class EnhancedIntelligentBrowser:
         except Exception as e:
             print(f"Platform detection issue: {e}")
         return False
+
     def find_and_click_download_button(self):
         print("Looking for download button...")
         selectors = [
@@ -497,20 +587,20 @@ class EnhancedIntelligentBrowser:
                             time.sleep(0.5)
                             try:
                                 elem.click()
-                            except:
+                            except Exception:
                                 self.driver.execute_script("arguments[0].click();", elem)
                             print("Download clicked")
                             time.sleep(2)
                             return True
-                except:
+                except Exception:
                     continue
             print("No download button found automatically")
             return False
         except Exception as e:
             print(f"Error finding download button: {e}")
             return False
+
     def open_website(self, url):
-        # Ensure we have a valid window first
         if not self._ensure_valid_window():
             print("Browser window closed, cannot open website")
             return False
@@ -546,7 +636,7 @@ class EnhancedIntelligentBrowser:
                     title = self.driver.title
                     print(f"Loaded: {title}")
                     return True
-                except:
+                except Exception:
                     print("Page loaded but title unavailable")
                     return True
             except Exception as e:
@@ -559,6 +649,7 @@ class EnhancedIntelligentBrowser:
                     time.sleep(2)
                     continue
         return False
+
     def click_first_result(self):
         try:
             print("Clicking first result...")
@@ -572,11 +663,11 @@ class EnhancedIntelligentBrowser:
         except Exception as e:
             print(f"Could not click first result: {e}")
             return False
+
     def install_via_snap(self, app_name):
-        """Install application via Snap Store"""
         try:
             if self.platform_name != "Linux":
-                print(f"⚠️  Snap is primarily for Linux. Falling back to web download...")
+                print("⚠️  Snap is primarily for Linux. Falling back to web download...")
                 return self.download_and_install(app_name)
             
             if not shutil.which("snap"):
@@ -586,32 +677,27 @@ class EnhancedIntelligentBrowser:
                 return self.download_and_install(app_name)
             
             print(f"🔍 Checking if {app_name} is available in Snap Store...")
-            result = subprocess.run(['snap', 'info', app_name], 
-                                  capture_output=True, text=True, timeout=10)
+            result = subprocess.run(['snap', 'info', app_name], capture_output=True, text=True, timeout=10)
             
             if result.returncode == 0:
                 print(f"✅ Found {app_name} in Snap Store!")
                 print(f"📦 Installing {app_name} via snap...")
-                # Run in terminal so user can see progress and enter password
-                subprocess.Popen(['x-terminal-emulator', '-e', 
-                                f'bash -c "sudo snap install {app_name}; echo; echo Press Enter to close...; read"'])
-                print(f"✓ Installation command launched in terminal")
+                subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "sudo snap install {app_name}; echo; echo Press Enter to close...; read"'])
+                print("✓ Installation command launched in terminal")
                 return True
             else:
                 print(f"❌ {app_name} not found in Snap Store")
                 print("🌐 Falling back to web download...")
                 return self.download_and_install(app_name)
-                
         except Exception as e:
             print(f"❌ Error with Snap installation: {e}")
             print("🌐 Falling back to web download...")
             return self.download_and_install(app_name)
     
     def install_via_flatpak(self, app_name):
-        """Install application via Flatpak"""
         try:
             if self.platform_name != "Linux":
-                print(f"⚠️  Flatpak is primarily for Linux. Falling back to web download...")
+                print("⚠️  Flatpak is primarily for Linux. Falling back to web download...")
                 return self.download_and_install(app_name)
             
             if not shutil.which("flatpak"):
@@ -621,42 +707,34 @@ class EnhancedIntelligentBrowser:
                 return self.download_and_install(app_name)
             
             print(f"🔍 Searching for {app_name} in Flathub...")
-            result = subprocess.run(['flatpak', 'search', app_name], 
-                                  capture_output=True, text=True, timeout=10)
+            result = subprocess.run(['flatpak', 'search', app_name], capture_output=True, text=True, timeout=10)
             
             if result.stdout and len(result.stdout.strip()) > 0:
                 print(f"✅ Found {app_name} in Flathub!")
-                # Try to extract the full app ID from search results
                 lines = result.stdout.strip().split('\n')
-                if len(lines) > 1:  # First line is header
-                    # Parse the first result - format: Name    Description    AppID    Version    Branch    Remotes
+                if len(lines) > 1:
                     parts = lines[1].split('\t')
                     if len(parts) >= 3:
                         app_id = parts[2].strip()
                         print(f"📦 Installing {app_id} via flatpak...")
-                        subprocess.Popen(['x-terminal-emulator', '-e', 
-                                        f'bash -c "flatpak install -y flathub {app_id}; echo; echo Press Enter to close...; read"'])
-                        print(f"✓ Installation command launched in terminal")
+                        subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "flatpak install -y flathub {app_id}; echo; echo Press Enter to close...; read"'])
+                        print("✓ Installation command launched in terminal")
                         return True
                 
-                # Fallback: just use the app name
                 print(f"📦 Installing {app_name} via flatpak...")
-                subprocess.Popen(['x-terminal-emulator', '-e', 
-                                f'bash -c "flatpak install -y flathub {app_name}; echo; echo Press Enter to close...; read"'])
-                print(f"✓ Installation command launched in terminal")
+                subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "flatpak install -y flathub {app_name}; echo; echo Press Enter to close...; read"'])
+                print("✓ Installation command launched in terminal")
                 return True
             else:
                 print(f"❌ {app_name} not found in Flathub")
                 print("🌐 Falling back to web download...")
                 return self.download_and_install(app_name)
-                
         except Exception as e:
             print(f"❌ Error with Flatpak installation: {e}")
             print("🌐 Falling back to web download...")
             return self.download_and_install(app_name)
     
     def install_via_appstore(self, app_name):
-        """Install application via native App Store (Microsoft Store / Mac App Store / GNOME Software)"""
         try:
             if self.platform_name == "Windows":
                 print("🏪 Opening Microsoft Store...")
@@ -665,7 +743,6 @@ class EnhancedIntelligentBrowser:
                 print(f"✓ Microsoft Store opened for: {app_name}")
                 print("💡 Please complete the installation in the store")
                 return True
-                
             elif self.platform_name == "Darwin":
                 print("🏪 Opening Mac App Store...")
                 search_url = f"macappstore://search.itunes.apple.com/WebObjects/MZSearch.woa/wa/search?media=software&term={app_name.replace(' ', '%20')}"
@@ -673,15 +750,12 @@ class EnhancedIntelligentBrowser:
                 print(f"✓ Mac App Store opened for: {app_name}")
                 print("💡 Please complete the installation in the store")
                 return True
-                
             elif self.platform_name == "Linux":
-                # Try different Linux app stores
                 stores = [
                     ("gnome-software", "GNOME Software"),
                     ("snap-store", "Snap Store"),
                     ("plasma-discover", "KDE Discover"),
                 ]
-                
                 for cmd, name in stores:
                     if shutil.which(cmd):
                         print(f"🏪 Opening {name}...")
@@ -692,13 +766,10 @@ class EnhancedIntelligentBrowser:
                         print(f"✓ {name} opened")
                         print(f"💡 Search for '{app_name}' in the store and install")
                         return True
-                
                 print("❌ No app store found on this Linux system")
                 print("🌐 Falling back to web download...")
                 return self.download_and_install(app_name)
-            
             return False
-            
         except Exception as e:
             print(f"❌ Error opening app store: {e}")
             print("🌐 Falling back to web download...")
@@ -706,7 +777,10 @@ class EnhancedIntelligentBrowser:
     
     def close(self):
         print("\nClosing browser...")
-        self.driver.quit()
+        try:
+            self.driver.quit()
+        except Exception:
+            pass
 
 
 def process_voice_command(driver, system_controller, transcription):
