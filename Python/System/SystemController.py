@@ -1,9 +1,11 @@
 import os
 import platform
 import subprocess
+import time
 import shutil
 from pathlib import Path
 from difflib import SequenceMatcher
+
 
 class SystemController:
     def __init__(self):
@@ -682,3 +684,27 @@ class SystemController:
             print(f"{key}: {value}")
         print("="*60 + "\n")
         return info
+
+    def type_at_cursor(self, text: str, press_enter: bool = False):
+        """Types text directly into whatever field/app currently has keyboard focus."""
+        if not text:
+            return False, "No text provided to type"
+
+        # Escape quotes and backslashes for AppleScript string literals
+        safe_text = text.replace('\\', '\\\\').replace('"', '\\"')
+
+        # AppleScript tells System Events to simulate hardware keystrokes at the cursor position
+        enter_cmd = 'key code 36' if press_enter else ''
+        apple_script = f'''
+    tell application "System Events"
+        keystroke "{safe_text}"
+        {enter_cmd}
+    end tell
+    '''
+        try:
+            subprocess.run(["osascript", "-e", apple_script], check=True)
+            print(f"✓ Typed at cursor: '{text}'")
+            return True, f"Typed: {text}"
+        except Exception as e:
+            print(f"❌ Failed to type at cursor: {e}")
+            return False, str(e)
