@@ -1,4 +1,3 @@
-
 import sys
 import os
 import json
@@ -51,19 +50,24 @@ voice_queue = queue.Queue()
 websocket_connections = set()
 is_listening = False
 speech_detector = None
+main_loop: Optional[asyncio.AbstractEventLoop] = None
+
 
 class VoiceCommand(BaseModel):
     command: str
+
 
 class SystemStatus(BaseModel):
     status: str
     message: str
     timestamp: float
 
+
 class CommandResponse(BaseModel):
     success: bool
     message: str
     result: Optional[Dict[str, Any]] = None
+
 
 class ConnectionManager:
     def __init__(self):
@@ -74,19 +78,33 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def send_personal_message(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
 
     async def broadcast(self, message: str):
+        dead_connections = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
-            except:
-                self.active_connections.remove(connection)
+            except Exception:
+                dead_connections.append(connection)
+        for dc in dead_connections:
+            if dc in self.active_connections:
+                self.active_connections.remove(dc)
+
 
 manager = ConnectionManager()
+
+
+def broadcast_threadsafe(message: str):
+    """Safely dispatches WebSocket broadcast to the main asyncio event loop."""
+    global main_loop
+    if main_loop and main_loop.is_running():
+        asyncio.run_coroutine_threadsafe(manager.broadcast(message), main_loop)
+
 
 def _clean_response_message(message):
     if not message:
@@ -136,6 +154,7 @@ def _clean_response_message(message):
     
     return clean_message
 
+
 def ensure_browser_driver():
     global browser_driver
     try:
@@ -147,13 +166,13 @@ def ensure_browser_driver():
             return False
         
         try:
-            browser_driver.current_url
+            _ = browser_driver.current_url
             return True
-        except:
+        except Exception:
             logger.info("Browser window closed, reopening...")
             try:
                 browser_driver.quit()
-            except:
+            except Exception:
                 pass
             browser_driver = None
             browser_driver = setup_driver()
@@ -165,6 +184,7 @@ def ensure_browser_driver():
         logger.error(f"Error ensuring browser driver: {e}")
         browser_driver = None
         return False
+
 
 def initialize_system():
     global system_controller, browser_driver, speech_detector
@@ -186,6 +206,7 @@ def initialize_system():
     system_controller.get_system_info()
     logger.info("System initialization complete")
 
+
 def process_voice_input(audio_np):
     global browser_driver, system_controller, speech_detector
     try:
@@ -194,96 +215,72 @@ def process_voice_input(audio_np):
             transcription = stt_whisper(audio_np)
         else:
             transcription = stt_vosk(audio_np)
+
         if transcription and transcription.strip():
             logger.info(f"Voice input: {transcription}")
-            asyncio.create_task(manager.broadcast(json.dumps({
+
+            # Safely notify WebSocket clients
+            broadcast_threadsafe(json.dumps({
                 "type": "voice_transcription",
                 "text": transcription,
                 "timestamp": time.time()
-            })))
+            }))
+
             needs_browser = any(keyword in transcription.lower() for keyword in 
                               ['search', 'browser', 'web', 'google', 'youtube', 'website', 'download', 'open website'])
             
             if needs_browser:
                 if not ensure_browser_driver():
                     logger.warning("Browser not available for web command")
-            
+
+            success = False
+            message = ""
+
             if browser_driver and system_controller:
                 try:
-                    result = process_voice_command_smart(browser_driver, system_controller, transcription)
-                    if result == "EXIT":
-                        browser_driver = None
+                    res = process_voice_command_smart(browser_driver, system_controller, transcription)
+                    if isinstance(res, tuple):
+                        success, message = res
+                    else:
+                        success, message = True, str(res)
                 except Exception as e:
                     if "closed window" in str(e).lower() or "window_handles" in str(e).lower():
                         logger.info("Browser closed, attempting to reopen...")
                         if ensure_browser_driver():
-                            result = process_voice_command_smart(browser_driver, system_controller, transcription)
-                        else:
-                            class DummyDriver:
-                                def get(self, url): pass
-                                def quit(self): pass
-                            dummy = DummyDriver()
-                            assistant = SmartAssistant(dummy, system_controller)
-                            assistant.process_command(transcription)
+                            res = process_voice_command_smart(browser_driver, system_controller, transcription)
+                            if isinstance(res, tuple):
+                                success, message = res
+                            else:
+                                success, message = True, str(res)
                     else:
-                        raise
+                        logger.error(f"Browser command error: {e}")
             elif system_controller:
                 class DummyDriver:
                     def get(self, url): pass
                     def quit(self): pass
-                dummy = DummyDriver()
-                assistant = SmartAssistant(dummy, system_controller)
-                assistant.process_command(transcription)
-            if browser_driver and system_controller:
-                try:
-                    success, message = process_voice_command_smart(browser_driver, system_controller, transcription)
-                    if success and message and message not in ["Command processed", "CONTINUE", "EXIT"]:
-                        clean_message = _clean_response_message(message)
-                        if clean_message:
-                            asyncio.create_task(manager.broadcast(json.dumps({
-                                "type": "command_result",
-                                "text": transcription,
-                                "result": clean_message,
-                                "timestamp": time.time()
-                            })))
-                except Exception as e:
-                    if "closed window" in str(e).lower() or "window_handles" in str(e).lower():
-                        try:
-                            if ensure_browser_driver():
-                                success, message = process_voice_command_smart(browser_driver, system_controller, transcription)
-                                if success and message and message not in ["Command processed", "CONTINUE", "EXIT"]:
-                                    clean_message = _clean_response_message(message)
-                                    if clean_message:
-                                        asyncio.create_task(manager.broadcast(json.dumps({
-                                            "type": "command_result",
-                                            "text": transcription,
-                                            "result": clean_message,
-                                            "timestamp": time.time()
-                                        })))
-                        except:
-                            pass
-            elif system_controller:
-                dummy = type('DummyDriver', (), {'get': lambda self, url: None, 'quit': lambda self: None})()
-                assistant = SmartAssistant(dummy, system_controller)
+                assistant = SmartAssistant(DummyDriver(), system_controller)
                 success, message = assistant.process_command(transcription)
-                if success and message and message not in ["Command processed", "CONTINUE", "EXIT"]:
-                    clean_message = _clean_response_message(message)
-                    if clean_message:
-                        asyncio.create_task(manager.broadcast(json.dumps({
-                            "type": "command_result",
-                            "text": transcription,
-                            "result": clean_message,
-                            "timestamp": time.time()
-                        })))
+
+            if success and message and message not in ["Command processed", "CONTINUE", "EXIT"]:
+                clean_message = _clean_response_message(message)
+                if clean_message:
+                    broadcast_threadsafe(json.dumps({
+                        "type": "command_result",
+                        "text": transcription,
+                        "result": clean_message,
+                        "timestamp": time.time()
+                    }))
+
         return transcription
     except Exception as e:
         logger.error(f"Error processing voice input: {e}")
-        asyncio.create_task(manager.broadcast(json.dumps({
+        broadcast_threadsafe(json.dumps({
             "type": "error",
             "message": str(e),
             "timestamp": time.time()
-        })))
+        }))
         return None
+
 
 def start_voice_listening():
     global is_listening
@@ -292,6 +289,7 @@ def start_voice_listening():
     is_listening = True
     logger.info("Starting voice recognition...")
     def voice_thread():
+        global is_listening
         try:
             stream_microPhone(process_voice_input, buffer_seconds=3)
         except Exception as e:
@@ -301,15 +299,19 @@ def start_voice_listening():
     thread = threading.Thread(target=voice_thread, daemon=True)
     thread.start()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global main_loop
+    main_loop = asyncio.get_running_loop()
     initialize_system()
     yield
     if browser_driver:
         try:
             browser_driver.quit()
-        except:
+        except Exception:
             pass
+
 
 app = FastAPI(
     title="EitherAssistant API",
@@ -326,9 +328,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 async def root():
     return {"message": "EitherAssistant API Server", "status": "running"}
+
 
 @app.get("/status")
 async def get_status():
@@ -340,6 +344,7 @@ async def get_status():
         "timestamp": time.time()
     }
 
+
 @app.post("/voice/start")
 async def start_voice():
     global is_listening
@@ -349,11 +354,13 @@ async def start_voice():
     else:
         return {"success": True, "message": "Voice recognition already running"}
 
+
 @app.post("/voice/stop")
 async def stop_voice():
     global is_listening
     is_listening = False
     return {"success": True, "message": "Voice recognition stopped"}
+
 
 @app.post("/command")
 async def process_command(command: VoiceCommand):
@@ -372,20 +379,21 @@ async def process_command(command: VoiceCommand):
             
             if browser_driver:
                 try:
-                    success, message = process_voice_command_smart(browser_driver, system_controller, command.command)
+                    res = process_voice_command_smart(browser_driver, system_controller, command.command)
+                    success, message = res if isinstance(res, tuple) else (True, str(res))
                     result_message = _clean_response_message(message) if success else f"Error: {message}"
                 except Exception as e:
                     if "closed window" in str(e).lower() or "window_handles" in str(e).lower():
                         logger.info("Browser closed, attempting to reopen...")
                         if ensure_browser_driver():
-                            success, message = process_voice_command_smart(browser_driver, system_controller, command.command)
+                            res = process_voice_command_smart(browser_driver, system_controller, command.command)
+                            success, message = res if isinstance(res, tuple) else (True, str(res))
                             result_message = _clean_response_message(message) if success else f"Error: {message}"
                         else:
                             class DummyDriver:
                                 def get(self, url): pass
                                 def quit(self): pass
-                            dummy = DummyDriver()
-                            assistant = SmartAssistant(dummy, system_controller)
+                            assistant = SmartAssistant(DummyDriver(), system_controller)
                             success, message = assistant.process_command(command.command)
                             result_message = _clean_response_message(message) if success else f"Error: {message}"
                     else:
@@ -395,8 +403,7 @@ async def process_command(command: VoiceCommand):
                 class DummyDriver:
                     def get(self, url): pass
                     def quit(self): pass
-                dummy = DummyDriver()
-                assistant = SmartAssistant(dummy, system_controller)
+                assistant = SmartAssistant(DummyDriver(), system_controller)
                 success, message = assistant.process_command(command.command)
                 result_message = _clean_response_message(message) if success else f"Error: {message}"
             
@@ -417,6 +424,7 @@ async def process_command(command: VoiceCommand):
             message=f"Error: {str(e)}"
         )
 
+
 @app.post("/browser/enable")
 async def enable_browser():
     global browser_driver
@@ -433,6 +441,7 @@ async def enable_browser():
         logger.error(f"Error enabling browser: {e}")
         return {"success": False, "message": f"Error: {str(e)}"}
 
+
 @app.post("/browser/disable")
 async def disable_browser():
     global browser_driver
@@ -447,6 +456,7 @@ async def disable_browser():
         logger.error(f"Error disabling browser: {e}")
         return {"success": False, "message": f"Error: {str(e)}"}
 
+
 @app.get("/system/info")
 async def get_system_info():
     if system_controller:
@@ -456,6 +466,7 @@ async def get_system_info():
         }
     else:
         return {"success": False, "message": "System controller not initialized"}
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -471,6 +482,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+
 
 if __name__ == "__main__":
     import uvicorn
